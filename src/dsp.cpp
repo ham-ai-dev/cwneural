@@ -146,4 +146,59 @@ std::vector<float> NeuralDsp::extract_envelope(const std::complex<float>* baseba
 void NeuralDsp::set_target_freq(double freq_hz) {
     target_freq_ = freq_hz;
     freq_offset_ = target_freq_ - center_freq_;
+    carrier_locked_ = false;  // force re-lock on new frequency
+}
+
+// Auto-track the actual carrier peak within ±search_bw_hz of the target.
+// FFT approach: compute spectrum on first N samples, find peak in search window.
+double NeuralDsp::auto_track_carrier(const std::complex<float>* samples, int count,
+                                      double search_bw_hz) {
+    const double nominal_offset = target_freq_ - center_freq_;
+
+    // Use a power-of-2 FFT size from the first ~2 seconds
+    // Frequency resolution = sdr_rate_ / fft_size
+    // For 2M sps, 65536 samples → 30.5 Hz resolution
+    int fft_size = 1;
+    while (fft_size < std::min(count, 131072)) fft_size <<= 1;
+    if (fft_size > count) fft_size >>= 1;
+    if (fft_size < 256) {
+        // Not enough data — keep nominal
+        return nominal_offset;
+    }
+
+    // DFT via direct summation over search range only (fast when BW << fs)
+    // At 50 Hz steps over ±10 kHz = 400 test points × fft_size samples
+    // = 400 × 131072 = 52M ops — fast enough (~0.2 s)
+    const double step_hz = 50.0;
+    double best_freq = nominal_offset;
+    double best_power = -1.0;
+    int search_len = fft_size;
+
+    for (double test_freq = nominal_offset - search_bw_hz;
+         test_freq <= nominal_offset + search_bw_hz;
+         test_freq += step_hz)
+    {
+        double re = 0.0, im = 0.0;
+        double phase_inc = -2.0 * M_PI * test_freq / sdr_rate_;
+        double c = std::cos(phase_inc), s = std::sin(phase_inc);
+        double cr = 1.0, ci = 0.0;
+        for (int i = 0; i < search_len; i++) {
+            re += samples[i].real() * cr - samples[i].imag() * ci;
+            im += samples[i].real() * ci + samples[i].imag() * cr;
+            // Rotate phasor: (cr + i*ci) * (c + i*s)
+            double nr = cr*c - ci*s;
+            double ni = cr*s + ci*c;
+            cr = nr; ci = ni;
+        }
+        double power = re*re + im*im;
+        if (power > best_power) {
+            best_power = power;
+            best_freq = test_freq;
+        }
+    }
+
+    freq_offset_ = best_freq;
+    carrier_locked_ = true;
+
+    return best_freq;
 }

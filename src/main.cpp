@@ -299,6 +299,37 @@ int main(int argc, char** argv) {
         std::vector<std::complex<float>> iq_batch(8192);
         std::vector<std::complex<float>> chunk;
 
+        // --- Phase 1: Carrier lock (first 2 seconds of raw IQ) ---
+        // Accumulate raw IQ before decimation to FFT-search for the actual carrier
+        std::vector<std::complex<float>> carrier_lock_buf;
+        carrier_lock_buf.reserve(static_cast<int>(sample_rate * 2));
+        bool carrier_locked = false;
+
+        while (global_running && !carrier_locked) {
+            int got = 0;
+            for (int i = 0; i < 8192; i++) {
+                if (ring_buf->pop(iq_batch[i])) got++;
+                else break;
+            }
+            if (got == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            carrier_lock_buf.insert(carrier_lock_buf.end(), iq_batch.begin(), iq_batch.begin() + got);
+            // Feed through DSP so it stays in sync
+            dsp.process_iq(iq_batch.data(), got, chunk);
+
+            if (static_cast<int>(carrier_lock_buf.size()) >= static_cast<int>(sample_rate * 2)) {
+                double locked_offset = dsp.auto_track_carrier(carrier_lock_buf.data(), carrier_lock_buf.size(), 10000.0);
+                double locked_freq = center_freq + locked_offset;
+                std::cerr << "[Lock] Carrier found at " << locked_freq / 1e6 << " MHz"
+                          << " (offset " << locked_offset - (target_freq - center_freq) << " Hz from target)\n";
+                Tui::update_sdr_info(locked_freq, true);
+                carrier_locked = true;
+            }
+        }
+
+        // --- Phase 2: Decode with locked carrier ---
         // Accumulate up to 60 seconds of baseband.
         // Decode the entire buffer every 1 second to eliminate boundary corruption.
         float out_rate = dsp.get_output_rate();

@@ -23,7 +23,14 @@ public:
 
     void set_target_freq(double freq_hz);
     double get_target_freq() const { return target_freq_; }
+    double get_tracked_offset() const { return freq_offset_; }
     float get_output_rate() const { return output_rate_; }
+
+    // Search for the actual carrier peak within search_bw_hz of target.
+    // Call this on the first few seconds of accumulated IQ to lock on.
+    // Returns the adjusted freq_offset_ used from now on.
+    double auto_track_carrier(const std::complex<float>* samples, int count,
+                              double search_bw_hz = 10000.0);
 
 private:
     void design_lpf(int num_taps, float cutoff);
@@ -37,6 +44,7 @@ private:
     // NCO state
     double phase_acc_ = 0.0;
     double freq_offset_ = 0.0;
+    bool carrier_locked_ = false;
 
     // FIR lowpass filter
     std::vector<float> fir_taps_;
