@@ -178,6 +178,8 @@ double NeuralDsp::auto_track_carrier(const std::complex<float>* samples, int cou
          test_freq <= nominal_offset + search_bw_hz;
          test_freq += step_hz)
     {
+        // Skip DC region (±5 kHz around 0 Hz) — that's the HackRF DC spike
+        if (std::fabs(test_freq) < 5000.0) continue;
         double re = 0.0, im = 0.0;
         double phase_inc = -2.0 * M_PI * test_freq / sdr_rate_;
         double c = std::cos(phase_inc), s = std::sin(phase_inc);

@@ -340,6 +340,7 @@ int main(int argc, char** argv) {
         accum_buf.reserve(max_window + advance_step);
 
         int samples_since_decode = 0;
+        std::string last_stdout_text_;  // tracks what was last printed to stdout
 
         while (global_running) {
             // Drain ring buffer in batches
@@ -375,9 +376,50 @@ int main(int argc, char** argv) {
 
                     if (!text.empty() && text.size() >= 2) {
                         if (tui_mode) {
+                            // TUI: always show the rolling 60s window as-is
                             Tui::set_decoded_text(text);
                         } else {
-                            std::cout << "\r" << text << std::flush;
+                            bool window_full = (static_cast<int>(accum_buf.size()) >= max_window);
+
+                            if (last_stdout_text_.empty()) {
+                                // First decode — print everything on one line
+                                std::cout << text << std::flush;
+                                last_stdout_text_ = text;
+                            } else if (!window_full) {
+                                // Window still growing: text always starts with previous text.
+                                // Only print the newly added suffix.
+                                if (text.size() > last_stdout_text_.size() &&
+                                    text.substr(0, last_stdout_text_.size()) == last_stdout_text_) {
+                                    std::cout << text.substr(last_stdout_text_.size()) << std::flush;
+                                    last_stdout_text_ = text;
+                                } else if (text != last_stdout_text_) {
+                                    // Re-estimation changed earlier chars — print corrected line
+                                    std::cout << "\n" << text << std::flush;
+                                    last_stdout_text_ = text;
+                                }
+                            } else {
+                                // Window is at max (60s). Each 1s update drops chars from the
+                                // front and adds new ones to the back.
+                                // Emit a newline per second so text streams forward cleanly.
+                                if (text != last_stdout_text_) {
+                                    // Find what's new at the end
+                                    size_t common = 0;
+                                    size_t min_len = std::min(text.size(), last_stdout_text_.size());
+                                    for (size_t i = 0; i < min_len; i++) {
+                                        if (text[i] == last_stdout_text_[i]) common = i + 1;
+                                        else break;
+                                    }
+                                    // If most of the text changed (window slid, old chars dropped),
+                                    // start a fresh line
+                                    if (common < last_stdout_text_.size() / 2) {
+                                        std::cout << "\n" << text << std::flush;
+                                    } else {
+                                        // Just append the new tail
+                                        std::cout << text.substr(common) << std::flush;
+                                    }
+                                    last_stdout_text_ = text;
+                                }
+                            }
                         }
                     }
 
