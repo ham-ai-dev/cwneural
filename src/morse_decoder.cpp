@@ -24,7 +24,7 @@ const std::map<std::string, char>& MorseDecoder::morse_table() {
 }
 
 float MorseDecoder::otsu_threshold(const float* env, int len) {
-    // Find valid (non-zero) values
+    // Collect valid (non-zero) values
     std::vector<float> valid;
     valid.reserve(len);
     for (int i = 0; i < len; i++) {
@@ -32,19 +32,25 @@ float MorseDecoder::otsu_threshold(const float* env, int len) {
     }
     if (valid.empty()) return 0.0f;
 
-    // Build histogram
-    constexpr int NBINS = 256;
-    float min_v = *std::min_element(valid.begin(), valid.end());
-    float max_v = *std::max_element(valid.begin(), valid.end());
+    // Trim bottom 10th percentile — these are noise-floor samples that bias
+    // Otsu toward a too-low threshold on weak signals.
+    std::sort(valid.begin(), valid.end());
+    size_t trim_lo = valid.size() / 10;
+    float min_v = valid[trim_lo];
+    float max_v = valid.back();
     if (max_v - min_v < 1e-10f) return max_v * 0.5f;
 
+    // Build histogram on trimmed range
+    constexpr int NBINS = 256;
     std::vector<int> hist(NBINS, 0);
     for (float v : valid) {
+        if (v < min_v) continue;
         int bin = std::clamp(static_cast<int>((v - min_v) / (max_v - min_v) * (NBINS - 1)), 0, NBINS - 1);
         hist[bin]++;
     }
 
-    float total = static_cast<float>(valid.size());
+    float total = 0.0f;
+    for (int c : hist) total += c;
     float sum_total = 0.0f;
     for (int i = 0; i < NBINS; i++) {
         float mid = min_v + (max_v - min_v) * (i + 0.5f) / NBINS;
@@ -110,18 +116,38 @@ void MorseDecoder::keying_runs(const float* env, int len, float sample_rate,
 void MorseDecoder::estimate_dit_dah(const std::vector<float>& on_durs,
                                      float& dit_ms, float& dah_ms,
                                      float& split_val, float& wpm) {
+    // Use tracked WPM to compute minimum valid element duration.
+    // At the tracked WPM, a dit = 1200/WPM ms. Reject anything < 40% of that.
+    float min_element_ms = 5.0f;
+    if (wpm_ > 0) min_element_ms = std::max(5.0f, 1200.0f / wpm_ * 0.40f);
+
     if (on_durs.size() < 3) {
-        dit_ms = 60.0f; dah_ms = 180.0f; split_val = 120.0f; wpm = 20.0f;
+        // Not enough data — hold tracked WPM if available
+        if (wpm_ > 0) {
+            dit_ms = 1200.0f / wpm_;
+            dah_ms = dit_ms * 3.0f;
+            split_val = dit_ms * 2.0f;
+            wpm = wpm_;
+        } else {
+            dit_ms = 60.0f; dah_ms = 180.0f; split_val = 120.0f; wpm = 20.0f;
+        }
         return;
     }
 
-    // Filter noise spikes
+    // Filter noise spikes using adaptive minimum
     std::vector<float> sorted;
     for (float d : on_durs) {
-        if (d >= 5.0f) sorted.push_back(d);
+        if (d >= min_element_ms) sorted.push_back(d);
     }
     if (sorted.size() < 3) {
-        dit_ms = 60.0f; dah_ms = 180.0f; split_val = 120.0f; wpm = 20.0f;
+        if (wpm_ > 0) {
+            dit_ms = 1200.0f / wpm_;
+            dah_ms = dit_ms * 3.0f;
+            split_val = dit_ms * 2.0f;
+            wpm = wpm_;
+        } else {
+            dit_ms = 60.0f; dah_ms = 180.0f; split_val = 120.0f; wpm = 20.0f;
+        }
         return;
     }
 
@@ -161,7 +187,19 @@ void MorseDecoder::estimate_dit_dah(const std::vector<float>& on_durs,
         dah_ms = dit_ms * 3.0f;
     }
 
-    wpm = (dit_ms > 0) ? 1200.0f / dit_ms : 20.0f;
+    float new_wpm = (dit_ms > 0) ? 1200.0f / dit_ms : 20.0f;
+
+    // WPM exponential moving average — smooth across decode windows.
+    // Only update if the new estimate is within 50% of the tracked value
+    // (prevents garbage windows from resetting the tracker).
+    if (wpm_ <= 0.0f) {
+        wpm_ = new_wpm;  // first estimate — accept directly
+    } else if (new_wpm > wpm_ * 0.5f && new_wpm < wpm_ * 2.0f) {
+        wpm_ = 0.85f * wpm_ + 0.15f * new_wpm;  // slow adaptation
+    }
+    // else: new estimate is wildly different — ignore it, hold previous
+
+    wpm = wpm_;
 }
 
 void MorseDecoder::estimate_gaps(const std::vector<float>& off_durs,

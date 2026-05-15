@@ -358,11 +358,24 @@ int main(int argc, char** argv) {
                 // CNN classify each 2048-sample chunk
                 auto result = classifier.classify(chunk.data(), chunk.size());
 
+                // Track CNN confidence with slow EMA
+                static float cnn_conf_ema = 0.5f;
+                cnn_conf_ema = 0.9f * cnn_conf_ema + 0.1f * result.cw_confidence;
+
                 Tui::update_metrics(morse.get_wpm(), result.cw_confidence * 100.0f,
                                     result.cw_confidence, result.class_name);
 
-                // Accumulate all chunks to preserve continuous time gaps
-                accum_buf.insert(accum_buf.end(), chunk.begin(), chunk.end());
+                // Always accumulate to preserve timing gaps (silence is meaningful).
+                // But if a chunk is very clearly NOT CW (confidence < 0.2 AND EMA also
+                // low), replace with silence rather than noise to protect the Viterbi
+                // timing estimator from garbage signal segments.
+                if (!result.is_cw && result.cw_confidence < 0.2f && cnn_conf_ema < 0.4f) {
+                    // Insert silent chunk (zeros) to preserve the time gap without noise
+                    std::vector<std::complex<float>> silence(chunk.size(), {0.0f, 0.0f});
+                    accum_buf.insert(accum_buf.end(), silence.begin(), silence.end());
+                } else {
+                    accum_buf.insert(accum_buf.end(), chunk.begin(), chunk.end());
+                }
                 samples_since_decode += chunk.size();
 
                 // Decode every 1 second
